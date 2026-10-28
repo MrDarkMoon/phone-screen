@@ -1,0 +1,5 @@
+numpy
+opencv-python-headless==4.10.*
+av
+openvr
+websockets

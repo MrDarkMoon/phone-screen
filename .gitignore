@@ -1,0 +1,15 @@
+# Personal and generated: never published
+venv/
+__pycache__/
+home/
+snaps/
+*.jks
+learned.json
+track.csv
+android/build/
+models/*.onnx
+scrcpy-server-v*
+phone.png
+# old experiments, not used any more
+align.py
+detect.py

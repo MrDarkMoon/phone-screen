@@ -1,0 +1,171 @@
+diff --git a/hands/camd/camd.c b/hands/camd/camd.c
+index 7af00d5..46df4ff 100644
+--- a/hands/camd/camd.c
++++ b/hands/camd/camd.c
+@@ -102,6 +102,10 @@ typedef struct {
+     int             slot_of[MAX_INDEX]; /* buffer holding each V4L2 index     */
+     int             relearns;
+     bool            shared;             /* its buffers sit among another camera's  */
++    int             slot_xfd[MAX_SLOTS]; /* each buffer's plane 0 descriptor number in XRService */
++    int             vfd;                /* the camera's node, to ask it which buffer each index holds */
++    uint32_t        vtype;              /* its buffer type (single or multi-plane)    */
++    uint64_t        asked, corrected;   /* indices placed by asking; ...unlike the learned map */
+ 
+     double          recent[8];          /* means of the last frames, for dark detection */
+     int             nrecent;
+@@ -247,6 +251,69 @@ static bool group_fits(const xr_group_t *g, const xr_camera_t *cam, size_t need)
+  * share one 32-buffer run, bound to only one of them, so a camera without its
+  * own run also gets runs bound to cameras of the same model.
+  */
++/*
++ * Which buffer holds a V4L2 index right now. XRService doesn't always queue an index with
++ * the same buffer, so a map learned once goes wrong; guessing the fresh one afterwards can
++ * pick a buffer holding an older frame (side cameras' frames came out 0-250 ms older than
++ * their time stamps, at random). vb2 tells any handle which descriptor the owner last
++ * queued an index with, so ask at every frame, while the index is still dequeued.
++ */
++static void open_node(cam_t *c, const char *path)
++{
++    c->vfd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
++    if (c->vfd < 0)
++        return;
++
++    static const uint32_t types[] = { V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_BUF_TYPE_VIDEO_CAPTURE };
++
++    for (int i = 0; i < 2; i++) {
++        struct v4l2_buffer b;
++        struct v4l2_plane  planes[VIDEO_MAX_PLANES];
++        memset(&b, 0, sizeof(b));
++        memset(planes, 0, sizeof(planes));
++        b.type = types[i];
++        if (types[i] == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
++            b.m.planes = planes;
++            b.length   = VIDEO_MAX_PLANES;
++        }
++        if (ioctl(c->vfd, VIDIOC_QUERYBUF, &b) == 0 && b.memory == V4L2_MEMORY_DMABUF) {
++            c->vtype = types[i];
++            return;
++        }
++    }
++
++    close(c->vfd);
++    c->vfd = -1;
++}
++
++static int asked_slot(cam_t *c, int index)
++{
++    if (c->vfd < 0)
++        return -1;
++
++    struct v4l2_buffer b;
++    struct v4l2_plane  planes[VIDEO_MAX_PLANES];
++    memset(&b, 0, sizeof(b));
++    memset(planes, 0, sizeof(planes));
++    b.index = (unsigned)index;
++    b.type  = c->vtype;
++    if (c->vtype == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
++        b.m.planes = planes;
++        b.length   = VIDEO_MAX_PLANES;
++    }
++
++    if (ioctl(c->vfd, VIDIOC_QUERYBUF, &b) < 0)
++        return -1;
++
++    int xfd = c->vtype == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ? planes[0].m.fd : b.m.fd;
++
++    for (int s = 0; s < c->nslots; s++)
++        if (c->slot_xfd[s] == xfd)
++            return s;
++
++    return -1;
++}
++
+ static void setup_camera(cam_t *c, xr_camera_t *cam, int pidfd)
+ {
+     memset(c, 0, sizeof(*c));
+@@ -310,6 +377,7 @@ static void setup_camera(cam_t *c, xr_camera_t *cam, int pidfd)
+             int s = c->nslots++;
+             c->slot_group[s] = g;
+             c->slot_pos[s]   = b;
++            c->slot_xfd[s]   = grp->buf[b].xfd;
+             c->fd[s]         = fd;
+             c->map[s]        = m;
+ 
+@@ -317,6 +385,8 @@ static void setup_camera(cam_t *c, xr_camera_t *cam, int pidfd)
+         }
+     }
+ 
++    open_node(c, cam->path);
++
+     printf("  %-24s %-12s %ux%u pitch %u, %d candidate buffers%s\n", c->slug, cam->path,
+            c->lay.width, c->lay.height, c->lay.pitch, c->nslots,
+            !own ? " (shared run)" : exact ? ", bound by VIDIOC_QUERYBUF" : ", bound by open order");
+@@ -683,22 +753,33 @@ static void on_frame(cam_t *c, int64_t index, uint32_t seq, uint64_t ts, uint64_
+     if (c->color && evtime < c->paused_until)
+         return;
+ 
+-    if (!c->mapped) {
+-        learn(c, (int)index);
+-        return;
+-    }
++    int slot = asked_slot(c, (int)index);
++    bool asked = slot >= 0;
+ 
+-    if (index > c->maxindex) {
+-        reset_learning(c);     /* the queue grew */
+-        return;
+-    }
++    if (asked) {
++        c->asked++;
++        if (c->mapped && index <= c->maxindex && c->slot_of[index] != slot) {
++            c->corrected++;
++            c->slot_of[index] = slot;
++        }
++    } else {
++        if (!c->mapped) {
++            learn(c, (int)index);
++            return;
++        }
+ 
+-    int slot = c->slot_of[index];
++        if (index > c->maxindex) {
++            reset_learning(c);     /* the queue grew */
++            return;
++        }
+ 
+-    if (slot < 0) {     /* an index whose frames are all zeros (resolve_each): a dark one */
+-        c->dark++;
+-        c->rc->dropped++;
+-        return;
++        slot = c->slot_of[index];
++
++        if (slot < 0) {     /* an index whose frames are all zeros (resolve_each): a dark one */
++            c->dark++;
++            c->rc->dropped++;
++            return;
++        }
+     }
+ 
+     /* color runs at 60 fps: skip frames early enough that the asked rate holds, before any sync */
+@@ -718,7 +799,7 @@ static void on_frame(cam_t *c, int64_t index, uint32_t seq, uint64_t ts, uint64_
+     int nchanged;
+     int found = -1;
+ 
+-    if (!fresh(cur, c->samp[slot], &nchanged)) {
++    if (!asked && !fresh(cur, c->samp[slot], &nchanged)) {    /* asked: it is the right one, new or not */
+         buf_sync(c->fd[slot], DMA_BUF_SYNC_END);
+         found = find_fresh(c, cur);
+         if (found >= 0) {
+@@ -1099,10 +1180,11 @@ static void status(double secs)
+             c->last_bright = c->bright;
+             continue;
+         }
+-        printf("  %s %s%.1f fps (dark %llu at %.1f stale %llu torn %llu remapped %llu, sync %.2f ms copy %.2f ms)",
++        printf("  %s %s%.1f fps (dark %llu at %.1f stale %llu torn %llu remapped %llu asked %llu corrected %llu, sync %.2f ms copy %.2f ms)",
+                c->slug, c->mapped ? "" : "learning ", (double)(c->bright - c->last_bright) / opt_status,
+                (unsigned long long)c->dark, c->rc->dark_mean, (unsigned long long)c->stale,
+                (unsigned long long)c->torn, (unsigned long long)c->repairs,
++               (unsigned long long)c->asked, (unsigned long long)c->corrected,
+                c->nsync ? c->sync_ns / 1e6 / c->nsync : 0.0, c->bright ? c->copy_ns / 1e6 / c->bright : 0.0);
+         c->last_bright = c->bright;
+     }
