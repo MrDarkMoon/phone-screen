@@ -69,6 +69,9 @@ class PhoneVideo:
             time.sleep(3)
 
     def _session(self):
+        # a server left over from an earlier run (a crash, a restart) keeps capturing the
+        # phone's sound, and then the sound stays on the phone: only ever run one
+        adb('shell', 'pkill -f com.genymobile.scrcpy.Server')
         r = adb('push', SERVER, '/data/local/tmp/scrcpy-server.jar')
         if r.returncode:
             raise RuntimeError('push failed: ' + (r.stderr or r.stdout).strip())
