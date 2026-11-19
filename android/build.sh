@@ -10,7 +10,7 @@ KEY=$HOME/.config/phone-screen/app-key.jks     # the same key every build, so up
 rm -rf build && mkdir -p build/classes build/res
 ~/Android/bin/aapt2 compile --dir res -o build/res.zip
 ~/Android/bin/aapt2 link -o build/unsigned.apk --manifest AndroidManifest.xml -I $J build/res.zip \
-    --min-sdk-version 33 --target-sdk-version 36 --version-code ${VERSION:-1} --version-name 1.0
+    --min-sdk-version 33 --target-sdk-version 36 --version-code ${VERSION:-1} --version-name ${VERSION_NAME:-1.0}
 javac -Xlint:-options --release 17 -cp $J -d build/classes $(find src -name '*.java')
 $B/d8 --release --min-api 33 --lib $J --output build $(find build/classes -name '*.class')
 (cd build && zip -qj unsigned.apk classes.dex)

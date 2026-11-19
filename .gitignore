@@ -13,3 +13,4 @@ phone.png
 # old experiments, not used any more
 align.py
 detect.py
+dist/
