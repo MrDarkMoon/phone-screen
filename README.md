@@ -2,6 +2,11 @@
 
 Use your real Android phone inside VR on the **Steam Frame**. The headset tracks the phone you're holding, and its screen is drawn in VR exactly on top of it. Your apps, your touches and your phone's sound all work, with no PC needed: everything runs on the headset.
 
+<!-- Demo video: put a GIF or a link to a video here, for example
+[![Phone Screen demo](docs/demo.gif)](https://youtu.be/VIDEO_ID)
+-->
+*Demo video coming soon.*
+
 Phone Screen is an independent hobby project. It is not made by, or affiliated with, Valve or Google. It is experimental and works, but it isn't finished. Ideas and pull requests are very welcome. That's why it's here.
 
 ## How it works
@@ -34,25 +39,60 @@ Most of the tuning is learned while you use it, and saved in `~/.config/phone-sc
 - A Steam Frame running SteamOS with SteamVR.
 - [Frametop](https://github.com/DeeJanuz/frametop)'s camera broker `ft-camd` (in `hands/`). **Also apply `frametop-camd-exact-buffers.patch`** (see below).
 - A `dev` distrobox with `adb` (`android-tools`) and Java (JDK 17 or newer), to build the phone app.
-- An Android phone with wireless debugging paired to the headset. Developed on a Pixel 9 Pro XL (Android 16). The screen size and selfie-camera position in `pattern.py` and `facetrack.py` are that phone's, so change them for yours.
+- An Android phone (Android 13 or newer) with wireless debugging paired to the headset. Developed on a Pixel 9 Pro XL (Android 16), but other phones should work: the app measures your phone itself (see [Other phones](#other-phones)).
 - Optional: `clip-tts` on the PATH, for spoken status messages.
 
 ## Setup
 
-```sh
-./setup.sh                  # Python venv, scrcpy server, face model
-android/sdk-setup.sh        # Android build tools (aapt2/zipalign through FEX on the ARM Frame)
-distrobox enter dev -- android/build.sh    # builds android/build/PhoneScreen.apk
-./install.sh                # background service: starts tracking when the phone app does
-```
+On the Steam Frame, in this folder:
 
-Install `PhoneScreen.apk` on the phone. Pair wireless debugging once (`adb pair`). With more than one device connected, set `PHONE_SERIAL`.
+1. **Python side:** `./setup.sh` (Python venv, scrcpy server, face model).
+2. **Phone app:** either download `PhoneScreen-vN.apk` from the [Releases](https://github.com/MrDarkMoon/phone-screen/releases) page, or build it yourself:
+   ```sh
+   android/sdk-setup.sh                       # Android build tools (aapt2/zipalign through FEX on the ARM Frame)
+   distrobox enter dev -- android/build.sh    # builds android/build/PhoneScreen.apk
+   ```
+   A self-built app is signed with your own key, so it can't install over a release one (uninstall that first).
+3. **Wireless debugging:** on the phone, turn on Developer options, then Wireless debugging. Pair once from the Frame: `distrobox enter dev -- adb pair IP:PORT` (the phone shows both and a code). Check with `distrobox enter dev -- adb devices`. With more than one device connected, set `PHONE_SERIAL`.
+4. **Install the app:** `distrobox enter dev -- adb install PhoneScreen.apk`, or copy the APK to the phone and open it there.
+5. **Background service:** `./install.sh`. It starts tracking whenever the phone app does.
+
+### Other phones
+
+You don't need to change any code for a different phone. When you press Start tracking, the app sends the Frame:
+
+- the screen's size in pixels and its true pixel density (so its size in millimetres),
+- where the selfie camera is (from the screen's punch hole or notch),
+- the size and place of the markers it draws (as big as your screen's width allows, 56 mm at most).
+
+The Frame saves these in `~/.config/phone-screen/phone.json` and writes them to the log (`~/.local/state/phone-screen/phone-screen.log`, a line starting `phone app tracking:`). Check that line: the millimetres should match your phone's real screen. If the phone reports a nonsense density, the Pixel's size is used and the log says so. If there's no punch hole, the camera is guessed to be 7 mm below the top edge in the middle.
+
+Things that may differ on other phones:
+
+- **Brightness:** the cameras need the screen fairly bright. The brightness is learned, but very dim or very glossy screens may track worse.
+- **Gestures:** the app keeps the screen's side edges for the VR screen's back swipe. Some phones' own gestures may still win.
+- **Learned values** in `~/.config/phone-screen/learned.json` belong to one phone. After changing phones, delete that file (with the tracker stopped) so it learns afresh.
 
 ## Use
 
 Open **Phone Screen** on the phone and press **Start tracking**. The service starts the camera feed and the tracker, and your phone's screen appears in VR on the phone. To stop, hold three fingers on the screen for 2 seconds. About 15 seconds later everything is switched off and the headset is back to normal.
 
 To run it by hand instead: `venv/bin/python -u phone_screen.py` (add `PHONE_REC=1` to record `~/.local/state/phone-screen/track.csv` for analysis).
+
+## Working on the tracking without a Frame
+
+`replay.py` replays a recorded `track.csv` through the position filter (`fusion.py`), with no headset or phone needed:
+
+```sh
+venv/bin/python replay.py track.csv                       # how well the recorded run went
+venv/bin/python replay.py track.csv --set ACCEL_NOISE=2   # the same, with one of fusion.py's numbers changed
+```
+
+It prints the **drawn error** (where the screen was drawn, against where two or more cameras later saw the phone at that moment), **jitter**, **surprise** (how far each sighting was from the filter's guess), and **replay match** (how close the replay is to the live run; about 0 with `fusion.py` unchanged). Change `fusion.py` and run it again to see if your idea helps. Recordings are made on the Frame with `PHONE_REC=1`; share one in an issue if you'd like others to try.
+
+## Making a release
+
+`./release.sh N` builds app version N into `dist/PhoneScreen-vN.apk` (with a sha256 file). `./release.sh N --publish` puts it on a GitHub Release (it asks first, and the commit must be pushed). Keep `~/.config/phone-screen/app-key.jks` safe: every release must be signed with the same key to install over the last one.
 
 ## The camera timing fix for ft-camd
 
@@ -66,8 +106,11 @@ The patch asks V4L2 (`VIDIOC_QUERYBUF`) which buffer each index holds, for every
 |---|---|
 | `daemon.py`, `install.sh` | background service |
 | `phone_screen.py` | main loop: overlay, fusion, everything together |
-| `markers.py`, `solve.py`, `pattern.py` | marker and outline finding, joint fits |
+| `markers.py`, `solve.py` | marker and outline finding, joint fits |
+| `pattern.py` | the phone: its screen, selfie camera and marker layout, as its app reports them |
 | `fusion.py`, `sensors.py`, `headhist.py` | Kalman filter, phone sensors, head-pose history |
+| `replay.py` | replays a recorded track through the filter offline |
+| `release.sh` | builds the phone app for a GitHub Release |
 | `learn.py`, `train.py`, `facetrack.py` | self-learning, training mode, selfie-camera face tracking |
 | `phonelink.py`, `android/` | the phone app and its link (adb reverse, port 8778) |
 | `video.py`, `sharedtex.py`, `home.py` | scrcpy virtual display, sound, DMA-BUF overlay texture, VR home screen |
