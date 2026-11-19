@@ -3,6 +3,7 @@
 The sound is the phone's whole output (raw 48 kHz stereo); while it's sent, the phone's
 own speaker is quiet. It plays here through PipeWire, so it comes out of the headset."""
 import os
+import queue
 import random
 import socket
 import struct
@@ -35,6 +36,61 @@ def adb_bytes(*args):
     env = dict(os.environ, XDG_RUNTIME_DIR='/run/user/%d' % os.getuid())
     return subprocess.run(adb_cmd(*args),
                           env=env, capture_output=True).stdout
+
+
+class Shell:
+    """One `adb shell` kept open for commands asked often: starting adb (and its distrobox)
+    for each costs far more than the command itself. Started again if it dies."""
+
+    def __init__(self):
+        self.proc = None
+        self.lines = None
+        self.lock = threading.Lock()
+        self.n = 0
+
+    def _start(self):
+        env = dict(os.environ, XDG_RUNTIME_DIR='/run/user/%d' % os.getuid())
+        self.proc = subprocess.Popen(adb_cmd('shell'), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        self.lines = queue.Queue()
+        threading.Thread(target=self._read, args=(self.proc, self.lines), daemon=True).start()
+
+    @staticmethod
+    def _read(proc, lines):
+        for line in proc.stdout:
+            lines.put(line)
+        lines.put(None)             # the shell ended
+
+    def close(self):
+        if self.proc:
+            self.proc.kill()
+            self.proc = None
+
+    def run(self, cmd, timeout=5.0):
+        """The command's output, or None if the phone didn't answer in time."""
+        with self.lock:
+            if self.proc is None or self.proc.poll() is not None:
+                self._start()
+            self.n += 1
+            end = '__phone_screen_%d__' % self.n
+            try:
+                self.proc.stdin.write('%s; echo %s\n' % (cmd, end))
+                self.proc.stdin.flush()
+            except OSError:
+                self.close()
+                return None
+            out, t_end = [], time.monotonic() + timeout
+            while True:
+                try:
+                    line = self.lines.get(timeout=max(0.0, t_end - time.monotonic()))
+                except queue.Empty:
+                    line = None
+                if line is None:        # no answer, or the shell ended: start afresh next time
+                    self.close()
+                    return None
+                if line.strip() == end:
+                    return ''.join(out)
+                out.append(line)
 
 
 # Touch actions (Android MotionEvent)

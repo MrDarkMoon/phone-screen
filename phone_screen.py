@@ -209,20 +209,27 @@ class App:
 
     def keep_reverse(self, port):
         """adb reverse brings the phone's 127.0.0.1:port here. It's lost when the phone's
-        Wi-Fi debugging reconnects, so it's set again whenever the phone isn't connected."""
+        Wi-Fi debugging reconnects, so it's set again whenever the phone isn't connected:
+        often at first, then less often the longer it stays away."""
+        away = 0
         while True:
-            if not self.page.connected:
+            if self.page.connected:
+                away = 0
+            else:
                 video.adb('reverse', 'tcp:%d' % port, 'tcp:%d' % port)
-            time.sleep(5)
+                away += 1
+            time.sleep(5 if away < 12 else 20)
 
     def watch_apps(self):
-        """Back to our home screen when the open app closes (Android shows its own launcher)."""
+        """Back to our home screen when the open app closes (Android shows its own launcher).
+        Asked through one adb shell kept open, not a new adb each time."""
+        shell = video.Shell()
         while True:
             time.sleep(1.5)
             if self.home.mode != 'app' or time.monotonic() - self.home.opened < 3:
                 continue
-            out = video.adb('shell', 'dumpsys activity activities | grep -A3 "^Display #[1-9]" | grep topResumed').stdout
-            if 'SecondaryDisplayLauncher' in out:
+            out = shell.run('dumpsys activity activities | grep -A3 "^Display #[1-9]" | grep topResumed')
+            if out and 'SecondaryDisplayLauncher' in out:
                 self.home.go_home()
 
     def cam_time(self, name, stamp_ns):
