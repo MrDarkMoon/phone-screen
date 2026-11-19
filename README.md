@@ -2,10 +2,9 @@
 
 Use your real Android phone inside VR on the **Steam Frame**. The headset tracks the phone you're holding, and its screen is drawn in VR exactly on top of it. Your apps, your touches and your phone's sound all work, with no PC needed: everything runs on the headset.
 
-<!-- Demo video: put a GIF or a link to a video here, for example
-[![Phone Screen demo](docs/demo.gif)](https://youtu.be/VIDEO_ID)
--->
-*Demo video coming soon.*
+![Phone Screen demo: the phone's screen drawn in VR on top of the real phone, seen through the headset's passthrough](docs/demo.gif)
+
+*What you see in the headset: the real phone shows the tracking pattern, and its screen is drawn on top of it.*
 
 Phone Screen is an independent hobby project. It is not made by, or affiliated with, Valve or Google. It is experimental and works, but it isn't finished. Ideas and pull requests are very welcome. That's why it's here.
 
@@ -110,6 +109,7 @@ The patch asks V4L2 (`VIDIOC_QUERYBUF`) which buffer each index holds, for every
 | `pattern.py` | the phone: its screen, selfie camera and marker layout, as its app reports them |
 | `fusion.py`, `sensors.py`, `headhist.py` | Kalman filter, phone sensors, head-pose history |
 | `replay.py` | replays a recorded track through the filter offline |
+| `record_demo.sh` | records what you see in the headset and makes the README's GIF |
 | `release.sh` | builds the phone app for a GitHub Release |
 | `learn.py`, `train.py`, `facetrack.py` | self-learning, training mode, selfie-camera face tracking |
 | `phonelink.py`, `android/` | the phone app and its link (adb reverse, port 8778) |
