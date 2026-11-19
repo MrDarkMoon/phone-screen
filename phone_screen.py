@@ -170,7 +170,9 @@ class App:
         self.stats = [0, 0, 0, 0]   # sightings: markers in one camera, in two or more; outline only; face
         self.rec = open(LOG_DIR / 'track.csv', 'w', buffering=1) if os.environ.get('PHONE_REC') else None
         self.face = facetrack.FaceTracker(log=log.info)
-        self.facelearn = facetrack.FaceLearner(self.learner.v, log=log.info)
+        self.facelearn = {'yunet': facetrack.FaceLearner(self.learner.v, log=log.info),
+                          'phone': facetrack.FaceLearner(self.learner.v, log=log.info, prefix='fbox_',
+                                                         what="the phone's face box")}
         self.page.face = self.face
         # the phone sends it only when its stream starts; until then, the last one (or a guess)
         self.face.caminfo(*self.learner.v.get('caminfo', (640, 480, 380.0, 380.0, 320.0, 240.0, 270)))
@@ -459,7 +461,8 @@ class App:
         self.cam_on = tracking
         while self.face.count > self.face_done and self.face.results:
             self.face_done = self.face.count
-            t, rays, width, f = self.face.results[-1]
+            t, rays, width, f, source = self.face.results[-1]
+            facelearn = self.facelearn[source]
             head = self.heads.at(t)
             if head is None:
                 continue
@@ -467,14 +470,14 @@ class App:
             if near:                    # the markers know where the phone was: learn from it
                 _, centre, R = min(near, key=lambda m: abs(m[0] - t))
                 C = centre + R @ pattern.current.cam
-                self.facelearn.add(head, C, [R @ r for r in rays])
-                nb = self.facelearn.nose()
+                facelearn.add(head, C, [R @ r for r in rays])
+                nb = facelearn.nose()
                 if nb is not None:
-                    self.facelearn.size_seen(np.linalg.norm(head[:3, :3] @ nb[0] + head[:3, 3] - C), width, f)
+                    facelearn.size_seen(np.linalg.norm(head[:3, :3] @ nb[0] + head[:3, 3] - C), width, f)
                 continue
             if self.marker_sights and t - self.marker_sights[-1][0] < 0.15:
                 continue                # the markers will be back in a moment
-            nb, k = self.facelearn.nose(), self.facelearn.face_k()
+            nb, k = facelearn.nose(), facelearn.face_k()
             if nb is None or k is None or self.offset is None or not self.sensors.fresh():
                 continue
             N, mirrored, _ = nb

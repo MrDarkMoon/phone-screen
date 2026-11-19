@@ -67,6 +67,9 @@ import java.nio.ByteBuffer;
  * (T the camera's own time stamp), or  snaperr WHY.
  * cam on|off: a steady stream of small selfie pictures while tracking (for face tracking):
  *   caminfo W H FX FY CX CY SENSOR_ORIENTATION TIMESTAMP_SOURCE, then  cam T BASE64_JPEG  lines.
+ *   If the camera finds faces itself (Camera2 face detection), it sends  face T X Y W H SCORE
+ *   instead (the face's box in the stream's pixels, unrotated), and pictures only while it
+ *   hasn't found a face for a second, so the Frame's own detector can try.
  * T is the sensor's own time (elapsedRealtimeNanos); ping/pong lets the Frame match clocks.
  */
 public class MainActivity extends Activity implements SensorEventListener {
@@ -424,6 +427,10 @@ public class MainActivity extends Activity implements SensorEventListener {
     CameraDevice streamDev;
     ImageReader streamReader;
     long lastSent = 0;
+    int faceMode = 0;                   // the camera's own face detection: 0 none, 1 simple, 2 full
+    volatile long lastFace = 0;         // when it last found a face (sensor time)
+    Rect faceArray;                     // the face boxes' coordinates: the sensor's active array
+    static final long FACE_GAP_NS = 1_000_000_000L;     // no face this long: send pictures again
 
     void startStream() {
         if (streamDev != null || !tracking) return;
@@ -443,13 +450,20 @@ public class MainActivity extends Activity implements SensorEventListener {
             }
             if (id == null) { send("snaperr no front camera"); return; }
             sendCamInfo(ch);
+            faceMode = 0;
+            int[] modes = ch.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES);
+            if (modes != null) for (int m : modes) faceMode = Math.max(faceMode, m);
+            faceArray = ch.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+            if (faceArray == null) faceMode = 0;
+            send("facemode " + faceMode);
             if (camThread == null) { camThread = new HandlerThread("camera"); camThread.start(); }
             Handler h = new Handler(camThread.getLooper());
             streamReader = ImageReader.newInstance(CAM_W, CAM_H, ImageFormat.YUV_420_888, 3);
             streamReader.setOnImageAvailableListener(r -> {
                 Image img = r.acquireLatestImage();
                 if (img == null) return;
-                if (img.getTimestamp() - lastSent >= CAM_EVERY_NS && connected) {
+                boolean phoneSees = faceMode > 0 && img.getTimestamp() - lastFace < FACE_GAP_NS;
+                if (!phoneSees && img.getTimestamp() - lastSent >= CAM_EVERY_NS && connected) {
                     lastSent = img.getTimestamp();
                     send("cam " + img.getTimestamp() + " " + Base64.encodeToString(toJpeg(img), Base64.NO_WRAP));
                 }
@@ -467,7 +481,8 @@ public class MainActivity extends Activity implements SensorEventListener {
                                     try {
                                         CaptureRequest.Builder rb = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
                                         rb.addTarget(reader.getSurface());
-                                        cs.setRepeatingRequest(rb.build(), null, h);
+                                        if (faceMode > 0) rb.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, faceMode);
+                                        cs.setRepeatingRequest(rb.build(), faceCallback, h);
                                     } catch (Exception e) { send("snaperr " + e); }
                                 }
                                 @Override public void onConfigureFailed(CameraCaptureSession cs) { send("snaperr stream setup failed"); }
@@ -481,6 +496,27 @@ public class MainActivity extends Activity implements SensorEventListener {
             send("snaperr " + e);
         }
     }
+
+    /** The camera's own face finds: the best face's box, put into the stream's pixels. */
+    final CameraCaptureSession.CaptureCallback faceCallback = new CameraCaptureSession.CaptureCallback() {
+        @Override
+        public void onCaptureCompleted(CameraCaptureSession cs, CaptureRequest rq, android.hardware.camera2.TotalCaptureResult r) {
+            if (faceMode == 0 || !connected) return;
+            android.hardware.camera2.params.Face[] faces = r.get(android.hardware.camera2.CaptureResult.STATISTICS_FACES);
+            Long t = r.get(android.hardware.camera2.CaptureResult.SENSOR_TIMESTAMP);
+            if (faces == null || faces.length == 0 || t == null) return;
+            android.hardware.camera2.params.Face best = faces[0];
+            for (android.hardware.camera2.params.Face f : faces) if (f.getScore() > best.getScore()) best = f;
+            // the stream is the middle of the active array, cut to 4:3 and scaled down
+            float cw = Math.min(faceArray.width(), faceArray.height() * (float) CAM_W / CAM_H);
+            float chh = cw * CAM_H / CAM_W;
+            float x0 = (faceArray.width() - cw) / 2f, y0 = (faceArray.height() - chh) / 2f, sc = CAM_W / cw;
+            Rect b = best.getBounds();
+            float bx = (b.centerX() - faceArray.left - x0) * sc, by = (b.centerY() - faceArray.top - y0) * sc;
+            lastFace = t;
+            send("face " + t + " " + bx + " " + by + " " + (b.width() * sc) + " " + (b.height() * sc) + " " + best.getScore());
+        }
+    };
 
     void stopStream() {
         if (streamDev != null) { streamDev.close(); streamDev = null; }

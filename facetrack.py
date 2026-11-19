@@ -10,6 +10,10 @@ Everything about the user's face is learned, not given:
   each nose direction is a ray from a known place; rays from many places meet at the nose;
 - how big the face looks at a distance ('face_k'), from the same moments;
 - whether the camera's picture is mirrored: both are tried, the one whose rays meet wins.
+If the phone's camera finds faces itself (Camera2 face detection), the phone sends just the
+face's box and no pictures, which saves YuNet's CPU here; YuNet is used whenever pictures
+come instead. The box's centre is a different point on the head than the nose, so each
+source learns its own point ('phone' and 'yunet' results; see FaceLearner's prefix).
 Once learned, a picture alone says where the phone is: the camera sits on the line back
 from the nose, at the distance the face's size says (sightings with their own, much
 looser, depth noise).
@@ -32,7 +36,7 @@ class FaceTracker:
         self.info = None            # (W, H, fx, fy, cx, cy, orientation)
         self.latest = None          # (time, jpeg bytes)
         self.cond = threading.Condition()
-        self.results = collections.deque(maxlen=50)    # (time, ray in phone frame [unmirrored, mirrored], width px, f)
+        self.results = collections.deque(maxlen=50)    # (time, ray in phone frame [unmirrored, mirrored], width px, f, source)
         self.count = 0
         self.on_info = None
         threading.Thread(target=self._run, daemon=True).start()
@@ -63,6 +67,29 @@ class FaceTracker:
             return rot, (fy, fx, cy, w - 1 - cx)
         return rot, (fx, fy, cx, cy)
 
+    def _point(self, u, v):
+        """A pixel of the stream's (unrotated) picture, in the upright picture."""
+        w, h = self.info[:2]
+        k = (self.info[6] // 90) % 4
+        return [(u, v), (h - 1 - v, u), (w - 1 - u, h - 1 - v), (v, w - 1 - u)][k]
+
+    def _rays(self, u, v, fx, fy, cx, cy):
+        # upright camera axes: x right, y down, z out of the screen; the phone's: x right,
+        # y up, z out. Unmirrored, the camera's right is the phone's left.
+        x, y = (u - cx) / fx, (v - cy) / fy
+        rays = [np.array([-x, -y, 1.0]), np.array([x, -y, 1.0])]     # unmirrored, mirrored
+        return [r / np.linalg.norm(r) for r in rays]
+
+    def box(self, t, x, y, bw, bh, score):
+        """A face the phone's own camera found: its box's centre and size, stream pixels."""
+        if self.info is None or score < 30:      # Camera2 scores 1-100
+            return
+        _, (fx, fy, cx, cy) = self._upright()
+        u, v = self._point(x, y)
+        width = bh if (self.info[6] // 90) % 2 else bw      # across the upright picture
+        self.results.append((t, self._rays(u, v, fx, fy, cx, cy), float(width), fx, 'phone'))
+        self.count += 1
+
     def _run(self):
         while True:
             with self.cond:
@@ -85,12 +112,7 @@ class FaceTracker:
                 continue
             f = faces[int(np.argmax(faces[:, 14]))]
             u, v = f[8], f[9]                       # the nose tip
-            # upright camera axes: x right, y down, z out of the screen; the phone's: x right,
-            # y up, z out. Unmirrored, the camera's right is the phone's left.
-            x, y = (u - cx) / fx, (v - cy) / fy
-            rays = [np.array([-x, -y, 1.0]), np.array([x, -y, 1.0])]     # unmirrored, mirrored
-            rays = [r / np.linalg.norm(r) for r in rays]
-            self.results.append((t, rays, float(f[2]), fx))
+            self.results.append((t, self._rays(u, v, fx, fy, cx, cy), float(f[2]), fx, 'yunet'))
             self.count += 1
 
 
@@ -99,12 +121,15 @@ class FaceLearner:
     Least squares on rays: each ray (origin c, direction r, head frame) adds (I - r r^T)."""
     DECAY = 0.998
 
-    def __init__(self, store, log=print):
-        self.v, self.log = store, log
-        self.A = [np.array(self.v.get('nose_A%d' % m, np.zeros((3, 3)))) for m in (0, 1)]
-        self.b = [np.array(self.v.get('nose_b%d' % m, np.zeros(3))) for m in (0, 1)]
-        self.c = [float(self.v.get('nose_c%d' % m, 0.0)) for m in (0, 1)]
-        self.n = int(self.v.get('nose_n', 0))
+    def __init__(self, store, log=print, prefix='nose_', what='nose'):
+        """prefix: where in learned.json ('nose_' for YuNet's nose, 'fbox_' for the phone's
+        face box centre); what: its name in the log."""
+        self.v, self.log, self.p, self.what = store, log, prefix, what
+        self.A = [np.array(self.v.get(prefix + 'A%d' % m, np.zeros((3, 3)))) for m in (0, 1)]
+        self.b = [np.array(self.v.get(prefix + 'b%d' % m, np.zeros(3))) for m in (0, 1)]
+        self.c = [float(self.v.get(prefix + 'c%d' % m, 0.0)) for m in (0, 1)]
+        self.n = int(self.v.get(prefix + 'n', 0))
+        self.k_key = 'face_k' if prefix == 'nose_' else prefix + 'k'
 
     def add(self, head, C_world, r_world_both):
         Hr, Hp = head[:3, :3], head[:3, 3]
@@ -139,20 +164,21 @@ class FaceLearner:
 
     def _save(self):
         for m in (0, 1):
-            self.v['nose_A%d' % m] = self.A[m].tolist()
-            self.v['nose_b%d' % m] = self.b[m].tolist()
-            self.v['nose_c%d' % m] = self.c[m]
-        self.v['nose_n'] = self.n
+            self.v[self.p + 'A%d' % m] = self.A[m].tolist()
+            self.v[self.p + 'b%d' % m] = self.b[m].tolist()
+            self.v[self.p + 'c%d' % m] = self.c[m]
+        self.v[self.p + 'n'] = self.n
         nb = self.nose()
         if nb is not None and self.n % 500 == 0:
-            self.log('learned: nose at %s mm in the headset frame (%s, rays miss by %.1f mm, %d pictures)'
-                     % (np.round(nb[0] * 1e3, 0), 'mirrored' if nb[1] else 'not mirrored', nb[2] * 1e3, self.n))
+            self.log('learned: %s at %s mm in the headset frame (%s, rays miss by %.1f mm, %d pictures)'
+                     % (self.what, np.round(nb[0] * 1e3, 0), 'mirrored' if nb[1] else 'not mirrored',
+                        nb[2] * 1e3, self.n))
 
     def face_k(self):
-        return self.v.get('face_k')
+        return self.v.get(self.k_key)
 
     def size_seen(self, dist, width_px, f):
         k = dist * width_px / f
         if 0.05 < k < 0.3:
-            old = self.v.get('face_k', k)
-            self.v['face_k'] = float(0.98 * old + 0.02 * k)
+            old = self.v.get(self.k_key, k)
+            self.v[self.k_key] = float(0.98 * old + 0.02 * k)

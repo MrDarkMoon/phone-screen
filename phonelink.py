@@ -138,6 +138,11 @@ class PhoneLink(sensors.PhoneSensors):
             self.log('phone app tracking: %s%s' % (phone.describe(), ''.join('; ' + n for n in notes)))
         elif kind == 'caminfo' and self.face:
             self.face.caminfo(int(w[1]), int(w[2]), float(w[3]), float(w[4]), float(w[5]), float(w[6]), int(w[7]))
+        elif kind == 'facemode':
+            self.log('phone camera face detection: %s' % ({'0': 'none, the Frame finds faces',
+                                                          '1': 'simple', '2': 'full'}.get(w[1], w[1])))
+        elif kind == 'face' and self.face and self.offset is not None:
+            self.face.box(self._time(w[1]), *(float(v) for v in w[2:7]))
         elif kind == 'cam' and self.face and self.offset is not None:
             self.face.frame(self._time(w[1]), base64.b64decode(w[2]))
         elif kind == 'jpg':
