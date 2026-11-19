@@ -371,7 +371,10 @@ class App:
         while self.accq:
             t, a = self.accq.popleft()
             if self.offset is not None:
-                self.fusion.accel(t, sensors.yaw_matrix(self.offset) @ a)
+                aw = sensors.yaw_matrix(self.offset) @ a
+                self.fusion.accel(t, aw)
+                if self.rec:    # A: an acceleration, world frame, as the fusion gets it (replay.py)
+                    self.rec.write('A,%.5f,%.4f,%.4f,%.4f\n' % (t, *aw))
         frame = self.video.frame
         landscape = bool(frame and frame[1] > frame[2]) and self.home.mode == 'app'
         while self.sightq:
@@ -394,12 +397,18 @@ class App:
             self.learner.sighted(tc, centre)
             if not outline:
                 self.marker_sights.append((tc, centre, R_fit))
-            y = self.fusion.sight(tc, centre, self.learner.sigma(kind))
+            sigma = self.learner.sigma(kind)
+            if self.rec:        # F: a sighting as the fusion gets it (time, kind, centre, noise)
+                self.rec.write('F,%.5f,%s,%.5f,%.5f,%.5f,%.5f\n' % (tc, kind, *centre, sigma))
+            y = self.fusion.sight(tc, centre, sigma)
             self.learner.sighting(tc, C, kind, y, self.fusion.pred_var)
             self.seen = now
         self.face_step(now)
         hold = HOLD_SENSORS if self.sensors.fresh() and self.offset is not None else HOLD
         self.centre = self.fusion.position(now + self.learner.v['lead'])
+        if self.rec:            # N: where the fusion says the phone is (now, how far ahead, centre)
+            self.rec.write('N,%.5f,%.4f%s\n' % (now, self.learner.v['lead'], '' if self.centre is None else
+                                               ',%.5f,%.5f,%.5f' % tuple(self.centre)))
         if self.centre is not None and now - self.seen < hold:
             R0 = self.orientation()
             if R0 is not None:
@@ -476,6 +485,8 @@ class App:
             centre = C - R @ pattern.current.cam
             lat, dep = 0.004 + 0.02 * s, 0.08 * s           # surer across than in depth
             cov = np.eye(3) * lat ** 2 + np.outer(r, r) * (dep ** 2 - lat ** 2)
+            if self.rec:        # F with a covariance: a face sighting
+                self.rec.write('F,%.5f,face,%.5f,%.5f,%.5f,%s\n' % (t, *centre, ','.join('%.4g' % v for v in cov.ravel())))
             self.fusion.sight(t, centre, None, cov=cov)
             self.stats[3] += 1
             self.seen = now
