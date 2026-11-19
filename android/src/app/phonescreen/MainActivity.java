@@ -58,7 +58,10 @@ import java.nio.ByteBuffer;
  * tracking pattern the headset's cameras find, and the app sends the Frame its motion
  * sensors and every touch, over adb (adb reverse tcp:8778 brings 127.0.0.1:8778 to the Frame).
  *
- * Lines it sends:  hello W H XDPI YDPI | train 0/1 | stopped | r T x y z w | a T x y z | p T cm | t ACTION ID X Y P | pong N T
+ * Lines it sends:  hello W H XDPI YDPI px=WxH dpi=D cam=X,Y,Z markers=ID:SIDE:CY,... name=MODEL
+ *   (the real screen in pixels and its density, the selfie camera from the screen's centre in mm,
+ *   the pattern's markers in mm: the Frame takes all its phone numbers from this)
+ *                   | train 0/1 | stopped | r T x y z w | a T x y z | p T cm | t ACTION ID X Y P | pong N T
  * Lines it reads:  level N (0-255 pattern brightness) | ping N | start | stop | snap N
  * snap N: N pictures from the front (selfie) camera, sent back as  jpg T BASE64  lines
  * (T the camera's own time stamp), or  snaperr WHY.
@@ -68,8 +71,11 @@ import java.nio.ByteBuffer;
  */
 public class MainActivity extends Activity implements SensorEventListener {
     static final int PORT = 8778;
-    static final float MARKER_MM = 56f;
-    static final float[] MARKER_CY_MM = {36f, -36f}; // above / below the centre (y up)
+    // The pattern: two markers, as big as the screen's width allows (56 mm at most, the
+    // Pixel 9 Pro XL's), one above and one below the screen's centre, 16 mm apart.
+    static final float MARKER_MAX_MM = 56f, MARKER_GAP_MM = 16f;
+    float markerMm = MARKER_MAX_MM;
+    float[] markerCyMm = {36f, -36f};                // above / below the centre (y up)
     // ArUco DICT_4X4_50 ids 0 and 1: 6x6 cells, border included, row by row, 1 = white
     static final String[] MARKERS = {
         "000000010110001010000110000100000000",
@@ -153,8 +159,10 @@ public class MainActivity extends Activity implements SensorEventListener {
         if (tracking) return;
         tracking = true;
         training = train;
+        planPattern();
         startScreen.setVisibility(View.GONE);
         pattern.setVisibility(View.VISIBLE);
+        pattern.invalidate();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         WindowInsetsController c = getWindow().getInsetsController();
         if (c != null) {
@@ -195,10 +203,52 @@ public class MainActivity extends Activity implements SensorEventListener {
     void sendHello() {
         if (pattern.getWidth() > 0) {
             android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
-            send("hello " + pattern.getWidth() + " " + pattern.getHeight() + " " + dm.xdpi + " " + dm.ydpi);
+            Rect scr = getWindowManager().getMaximumWindowMetrics().getBounds();
+            int sw = scr.width(), sh = scr.height();
+            float[] cam = selfieCamera(sw, sh, dm);
+            StringBuilder m = new StringBuilder();
+            for (int k = 0; k < 2; k++)
+                m.append(k == 0 ? "" : ",").append(k).append(':').append(markerMm).append(':').append(markerCyMm[k]);
+            send("hello " + sw + " " + sh + " " + dm.xdpi + " " + dm.ydpi + " px=" + sw + "x" + sh
+                 + " dpi=" + dm.densityDpi + (cam == null ? "" : " cam=" + cam[0] + "," + cam[1] + "," + cam[2])
+                 + " markers=" + m + " name=" + android.os.Build.MODEL.replaceAll("\\s+", "_"));
             send("train " + (training ? 1 : 0));
         }
         else ui.postDelayed(this::sendHello, 100);
+    }
+
+    /** The markers' size from the screen's width: a margin of 7 mm each side, 56 mm at most. */
+    void planPattern() {
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        Rect scr = getWindowManager().getMaximumWindowMetrics().getBounds();
+        float wMm = scr.width() / dm.xdpi * 25.4f, hMm = scr.height() / dm.ydpi * 25.4f;
+        float side = Math.min(MARKER_MAX_MM, wMm - 14f);
+        side = Math.min(side, (hMm - MARKER_GAP_MM - 20f) / 2f);        // and both must fit, top to bottom
+        side = Math.round(side * 10f) / 10f;
+        markerMm = side;
+        float cy = side / 2f + MARKER_GAP_MM / 2f;
+        markerCyMm = new float[]{cy, -cy};
+    }
+
+    /** Where the selfie camera is, mm from the screen's centre (x right, y up, z out of the
+     *  screen), from the screen's cut-out (the camera's punch hole or notch). Null if there's none. */
+    float[] selfieCamera(int sw, int sh, android.util.DisplayMetrics dm) {
+        android.view.DisplayCutout cut = getDisplay().getCutout();
+        if (cut == null) return null;
+        android.graphics.RectF best = null;
+        android.graphics.Path path = cut.getCutoutPath();
+        if (path != null && !path.isEmpty()) {
+            best = new android.graphics.RectF();
+            path.computeBounds(best, true);
+        } else {
+            for (Rect r : cut.getBoundingRects()) {
+                if (best == null || r.top < best.top) best = new android.graphics.RectF(r);
+            }
+        }
+        if (best == null || best.isEmpty()) return null;
+        float x = (best.centerX() - sw / 2f) / dm.xdpi * 25.4f;
+        float y = (sh / 2f - best.centerY()) / dm.ydpi * 25.4f;
+        return new float[]{Math.round(x * 10) / 10f, Math.round(y * 10) / 10f, -1f};
     }
 
     void send(String line) {
@@ -522,9 +572,14 @@ public class MainActivity extends Activity implements SensorEventListener {
             // true millimetres: the panel's own pixel density, across and down
             android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
             float mmX = dm.xdpi / 25.4f, mmY = dm.ydpi / 25.4f;
-            float cw = MARKER_MM * mmX / 6f, ch = MARKER_MM * mmY / 6f;
+            float cw = markerMm * mmX / 6f, ch = markerMm * mmY / 6f;
+            // around the real screen's centre, even if this view doesn't cover all of it
+            Rect scr = getWindowManager().getMaximumWindowMetrics().getBounds();
+            int[] at = new int[2];
+            getLocationOnScreen(at);
+            float mx = scr.width() / 2f - at[0], my = scr.height() / 2f - at[1];
             for (int k = 0; k < 2; k++) {
-                float x0 = w / 2f - 3 * cw, y0 = h / 2f - MARKER_CY_MM[k] * mmY - 3 * ch;
+                float x0 = mx - 3 * cw, y0 = my - markerCyMm[k] * mmY - 3 * ch;
                 String bits = MARKERS[k];
                 for (int i = 0; i < 36; i++) {
                     if (bits.charAt(i) == '1') continue;

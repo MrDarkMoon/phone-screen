@@ -1,6 +1,5 @@
 """The link to Phone Screen's own phone app (android/): one connection for the tracking
-pattern, the phone's motion sensors and its touches. It stands in for both
-pattern.PatternServer and sensors.PhoneSensors.
+pattern, the phone's motion sensors and its touches.
 
 The app connects to 127.0.0.1:8778 on the phone; adb reverse brings that here. Sensor
 readings carry the phone's own clock (elapsedRealtimeNanos). Every half second we ping;
@@ -14,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 
+import pattern
 import sensors
 
 PORT = 8778
@@ -23,22 +23,23 @@ SNAPS = Path.home() / '.local/state/phone-screen/snaps'    # the phone's selfie-
 class PhoneLink(sensors.PhoneSensors):
     synced = True               # sensor times come from a real clock match, not a guess
 
-    def __init__(self, log=print, on_touch=None, on_accel=None):
-        super().__init__(log=log, on_accel=on_accel, connect=False)
+    def __init__(self, log=print, on_touch=None, on_accel=None, on_phone=None):
+        super().__init__(log=log, on_accel=on_accel)
         self.on_touch = on_touch
+        self.on_phone = on_phone    # called with the phone (pattern.Phone) when its app says hello
         self.conn = None
         self.lock = threading.Lock()
         self.info = None
         self.tracking = False
         self.training = False       # the app's Training button (train.py)
-        self.prox = None
-        self.face = None            # facetrack.FaceTracker, fed the selfie pictures            # the proximity sensor's last reading, cm
+        self.prox = None            # the proximity sensor's last reading, cm
+        self.face = None            # facetrack.FaceTracker, fed the selfie pictures
         self.pings = collections.deque(maxlen=60)       # (round trip, offset) of the last ~30 s
         self.offset = None          # our time minus the phone's, seconds
         threading.Thread(target=self._serve, daemon=True).start()
         threading.Thread(target=self._ping, daemon=True).start()
 
-    # ---- the pattern side (as pattern.PatternServer)
+    # ---- the pattern side
 
     @property
     def connected(self):
@@ -126,9 +127,15 @@ class PhoneLink(sensors.PhoneSensors):
         elif kind == 'p':
             self.prox = float(w[2])
         elif kind == 'hello':
-            self.info = dict(w=int(w[1]), h=int(w[2]))
+            phone, notes = pattern.Phone.from_hello(w)
+            self.info = dict(w=phone.px[0], h=phone.px[1])
+            if phone != pattern.current:
+                pattern.current = phone
+                phone.save()
+                if self.on_phone:
+                    self.on_phone(phone)
             self.tracking = True
-            self.log('phone app tracking: screen %s x %s' % (w[1], w[2]))
+            self.log('phone app tracking: %s%s' % (phone.describe(), ''.join('; ' + n for n in notes)))
         elif kind == 'caminfo' and self.face:
             self.face.caminfo(int(w[1]), int(w[2]), float(w[3]), float(w[4]), float(w[5]), float(w[6]), int(w[7]))
         elif kind == 'cam' and self.face and self.offset is not None:

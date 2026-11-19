@@ -11,10 +11,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+import pattern
 import video
 
 DIR = Path.home() / '.local/share/phone-screen/home'
-W, H = 1008, 2244           # the real screen, pixels (the copy's coordinates)
 EDGE = 0.04                 # side and bottom edge zones for the gestures, as a fraction
 SWIPE = 0.08                # how far a gesture must go
 HOLD_BACK = 0.25            # an edge touch that hasn't become a gesture by now is a touch
@@ -54,6 +54,7 @@ class Home:
         self._show('home')
 
     def _hit(self, items, x, y):
+        W, H = pattern.current.px              # the real screen, pixels (the copy's coordinates)
         px, py = x * W, y * H
         for it in items:
             x0, y0, x1, y1 = it['box']

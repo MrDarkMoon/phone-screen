@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 
 MODEL = str(Path(__file__).resolve().parent / 'models/face_detection_yunet_2023mar.onnx')
-CAM_IN_PHONE = np.array([0.0, 0.071, -0.001])   # the selfie camera from the screen's centre, m (Pixel 9 Pro XL)
+# where the selfie camera sits on the phone: pattern.current.cam (the phone app says)
 
 
 class FaceTracker:

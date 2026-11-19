@@ -119,6 +119,7 @@ class PhoneVideo:
             self.control.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.log('video: connected')
         sock.settimeout(None)
+        self.sock = sock
         codec = av.CodecContext.create('h264', 'r')
         codec.thread_type = 'NONE'          # lowest latency
         data = None
@@ -155,6 +156,19 @@ class PhoneVideo:
             player.kill()
             sock.close()
             self.log('audio: stopped')
+
+    def set_display(self, new_display):
+        """A different size for the apps' display ("WxH/dpi"): the session starts again with it."""
+        self.log('video: apps display now %s' % new_display)
+        self.new_display = new_display
+        if self.proc:
+            self.proc.kill()            # the session ends; _run starts the next with the new size
+        s = getattr(self, 'sock', None)
+        if s:
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def touch(self, action, pointer, nx, ny, pressure=1.0):
         """A touch at (nx, ny), 0-1 across the shown picture."""

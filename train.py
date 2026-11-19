@@ -31,10 +31,11 @@ def ghost_image(size=(404, 900)):
     """The tracking pattern as the phone draws it, with a red edge and a cross to line up by."""
     w, h = size
     img = np.full((h, w, 4), 255, np.uint8)
-    pxmm = w / pattern.SCREEN_MM[0]
+    phone = pattern.current
+    pxmm = w / phone.screen_mm[0]
     d = cv2.aruco.getPredefinedDictionary(pattern.DICT)
-    s = int(round(pattern.MARKER_MM * pxmm))
-    for mid, cy in zip(pattern.MARKER_IDS, pattern.MARKER_CY_MM):
+    for mid, side, cy in phone.markers:
+        s = int(round(side * pxmm))
         m = cv2.aruco.generateImageMarker(d, mid, 6)
         m = cv2.resize(m, (s, s), interpolation=cv2.INTER_NEAREST)
         x0 = w // 2 - s // 2

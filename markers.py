@@ -19,9 +19,6 @@ sys.path.insert(0, os.path.join(os.environ.get('FRAMETOP', os.path.expanduser('~
 import calib  # noqa: E402
 from ring import Ring  # noqa: E402
 
-OBJ = pattern.marker_corners()
-
-
 def _detector():
     p = cv2.aruco.DetectorParameters()
     p.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
@@ -85,7 +82,15 @@ class MarkerTracker:
         self.det = _detector()
         self.ring = None
         self.checked = 0.0
+        self.phone = None
+        self._layout()
         self._open()
+
+    def _layout(self):
+        """The markers' corners on the phone, for the phone in use (pattern.current)."""
+        if self.phone is not pattern.current:
+            self.phone = pattern.current
+            self.obj = self.phone.marker_corners()
 
     def _open(self):
         """(Re)attach to ft-camd's ring; it makes a new one each time it starts."""
@@ -145,7 +150,7 @@ class MarkerTracker:
         if ids is None:
             self.roi.pop(rc.index, None)
             return [], []
-        keep = [(c.reshape(4, 2) + off, int(i)) for c, i in zip(corners, ids.ravel()) if int(i) in OBJ]
+        keep = [(c.reshape(4, 2) + off, int(i)) for c, i in zip(corners, ids.ravel()) if int(i) in self.obj]
         if not keep:
             self.roi.pop(rc.index, None)
             return [], []
@@ -159,7 +164,7 @@ class MarkerTracker:
     def _pose(self, cam, corners, ids):
         """solvePnP on a virtual pinhole: (R, t) of the phone in the head frame, reprojection rms."""
         px = np.concatenate(corners).astype(float)
-        obj = np.concatenate([OBJ[i] for i in ids])
+        obj = np.concatenate([self.obj[i] for i in ids])
         rays = cam.rays(px)
         B = tracker._basis(rays.mean(axis=0))
         local = rays @ B.T
@@ -178,6 +183,7 @@ class MarkerTracker:
     def step(self):
         """Returns (pose dict or None, dqbuf_ns of the frames used)."""
         now = time.monotonic()
+        self._layout()
         if now - self.checked > 2.0:
             self.checked = now
             if self.ring is None or not self.ring.alive(2.0):
@@ -213,7 +219,7 @@ class MarkerTracker:
                     outlines.append(dict(name=name, stamp=f.dqbuf_ns, rays=cam.rays(pts), origin=cam.origin,
                                          learn=True))
             px = np.concatenate(corners).astype(float)
-            obs = dict(points=np.concatenate([OBJ[i] for i in ids]), rays=cam.rays(px),
+            obs = dict(points=np.concatenate([self.obj[i] for i in ids]), rays=cam.rays(px),
                        origins=np.repeat(cam.origin[None], len(px), axis=0), stamp=f.dqbuf_ns)
             found.append((len(ids) * 4, R, t, err, name, obs))
         if not found:
@@ -234,7 +240,7 @@ class MarkerTracker:
         obs = {k: np.concatenate([f[5][k] for f in found]) for k in ('points', 'rays', 'origins')}
         return dict(kind='markers', outlines=[o for o in outlines if o.get('learn')], R=R, centre=t,
                     cams=len(found), err=float(min(f[3] for f in found)),
-                    corners=sum(f[0] for f in found), size=pattern.SCREEN_MM, obs=obs,
+                    corners=sum(f[0] for f in found), size=self.phone.screen_mm, obs=obs,
                     names=[f[4] for f in found],
                     cam_obs=[dict(name=f[4], stamp=f[5]['stamp'], centre=f[2], **{k: f[5][k] for k in
                              ('points', 'rays', 'origins')}) for f in found],

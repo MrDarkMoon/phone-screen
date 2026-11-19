@@ -37,7 +37,6 @@ log = logging.getLogger('phone-screen')
 HOLD = 0.4          # keep showing the screen this long after the cameras lose it
 HOLD_SENSORS = 2.0  # ...or this long while the phone's own sensors still say how it's turned
 LEVEL = 210         # the pattern's starting brightness (Brightness learns a better one)
-SCREEN = (pattern.SCREEN_MM[0] / 1000, pattern.SCREEN_MM[1] / 1000)
 
 
 def mat34(M):
@@ -139,18 +138,16 @@ class App:
         self.tex = sharedtex.SharedTexture(self.ov, self.handle)
         self.tracker = markers.MarkerTracker()
         self.accq = collections.deque()
-        if os.environ.get('PHONE_WEB'):     # the old way: pattern in the browser, Sensor Server app
-            self.page = pattern.PatternServer(log=log.info, on_touch=self.on_touch)
-            self.sensors = sensors.PhoneSensors(log=log.info, on_accel=lambda t, a: self.accq.append((t, a)))
-            port = pattern.PORT
-        else:                               # our phone app (android/) does both
-            self.page = self.sensors = phonelink.PhoneLink(
-                log=log.info, on_touch=self.on_touch, on_accel=lambda t, a: self.accq.append((t, a)))
-            port = phonelink.PORT
+        # our phone app (android/): the pattern, the sensors and the touches
+        self.page = self.sensors = phonelink.PhoneLink(
+            log=log.info, on_touch=self.on_touch, on_accel=lambda t, a: self.accq.append((t, a)),
+            on_phone=self.on_phone)
+        port = phonelink.PORT
         self.page_seen = False
         threading.Thread(target=self.keep_reverse, args=(port,), daemon=True).start()
         # apps run on a virtual display the size of the real screen; only VR shows it
-        self.video = video.PhoneVideo(max_size=900, log=log.info, new_display='1008x2244/360',
+        log.info('phone: %s', pattern.current.describe())
+        self.video = video.PhoneVideo(max_size=900, log=log.info, new_display=pattern.current.display,
                                      audio=True)
         self.home = home.Home(self.video, log=log.info)
         self.home_version = -1
@@ -204,6 +201,11 @@ class App:
             pid, p = int(pt['id']) & 0xffff, float(pt.get('p') or 1.0)
             if not self.home.touch(action, pid, pt['x'], pt['y'], p):
                 self.video.touch(a, pid, pt['x'], pt['y'], p)
+
+    def on_phone(self, phone):
+        """The app said hello with a different phone (or layout) than the one we started with."""
+        if phone.display != self.video.new_display:
+            self.video.set_display(phone.display)
 
     def keep_reverse(self, port):
         """adb reverse brings the phone's 127.0.0.1:port here. It's lost when the phone's
@@ -287,7 +289,7 @@ class App:
             H = self.heads.at(self.cam_time(ol['name'], ol['stamp']))
             if H is None:
                 continue
-            res = solve.Outline(ol['rays'], ol['origin'], SCREEN).residual(H[:3, :3].T @ R, H[:3, :3].T @ (t - H[:3, 3]))
+            res = solve.Outline(ol['rays'], ol['origin'], pattern.current.screen_m).residual(H[:3, :3].T @ R, H[:3, :3].T @ (t - H[:3, 3]))
             self.learner.glow_seen(ol['name'], float(np.median(res)))
         return t, R, rms, H0[:3, :3].T @ (t - H0[:3, 3])
 
@@ -298,7 +300,7 @@ class App:
         fits = []
         for ol, H in zip(p['outlines'], heads):
             Hr = H[:3, :3]
-            o = solve.Outline(ol['rays'], ol['origin'], SCREEN)
+            o = solve.Outline(ol['rays'], ol['origin'], pattern.current.screen_m)
             t, rms = o.fit(Hr.T @ prior, margin=self.learner.glow(ol['name']))
             if rms < 0.004 and 0.15 < np.linalg.norm(t) < 2.0:
                 fits.append((rms, Hr @ t + H[:3, 3]))
@@ -408,7 +410,8 @@ class App:
                     self.rec.write('D,%.4f,%.5f,%.5f,%.5f,%s\n' % (
                         now, *M[:3, 3], ','.join('%.5f' % v for v in R.T.ravel())))
                 if not self.trainer.active:
-                    self.ov.setOverlayWidthInMeters(self.handle, float(SCREEN[1] if landscape else SCREEN[0]))
+                    sw, sh = pattern.current.screen_m
+                    self.ov.setOverlayWidthInMeters(self.handle, float(sh if landscape else sw))
                     self.ov.setOverlayTransformAbsolute(self.handle, openvr.TrackingUniverseStanding, mat34(M))
         if self.training_step():
             return
@@ -447,7 +450,7 @@ class App:
             near = [m for m in self.marker_sights if abs(m[0] - t) < 0.03]
             if near:                    # the markers know where the phone was: learn from it
                 _, centre, R = min(near, key=lambda m: abs(m[0] - t))
-                C = centre + R @ facetrack.CAM_IN_PHONE
+                C = centre + R @ pattern.current.cam
                 self.facelearn.add(head, C, [R @ r for r in rays])
                 nb = self.facelearn.nose()
                 if nb is not None:
@@ -463,7 +466,7 @@ class App:
             r = R @ rays[mirrored]
             s = k * f / width                               # how far the face is
             C = head[:3, :3] @ N + head[:3, 3] - s * r      # the camera, back along the ray from the nose
-            centre = C - R @ facetrack.CAM_IN_PHONE
+            centre = C - R @ pattern.current.cam
             lat, dep = 0.004 + 0.02 * s, 0.08 * s           # surer across than in depth
             cov = np.eye(3) * lat ** 2 + np.outer(r, r) * (dep ** 2 - lat ** 2)
             self.fusion.sight(t, centre, None, cov=cov)
@@ -487,7 +490,7 @@ class App:
             self.training_shown = True
             self.tex.show(self.trainer.image)
             self.ov.setOverlayAlpha(self.handle, 0.55)
-            self.ov.setOverlayWidthInMeters(self.handle, float(SCREEN[0]))
+            self.ov.setOverlayWidthInMeters(self.handle, float(pattern.current.screen_m[0]))
         T = self.trainer.target.copy()
         T[:3, 3] += T[:3, 2] * 0.002
         self.ov.setOverlayTransformAbsolute(self.handle, openvr.TrackingUniverseStanding, mat34(T))

@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 
+import pattern
 import video
 
 HERE = Path(__file__).resolve().parent
@@ -73,7 +74,12 @@ def wait_for_start():
                 conn = None
                 continue
             buf += data
-            if any(line.startswith(b'hello') for line in buf.split(b'\n')):
+            hello = [line for line in buf.split(b'\n')[:-1] if line.startswith(b'hello')]
+            if hello:       # the phone's size and layout: the tracker reads them when it starts
+                phone, notes = pattern.Phone.from_hello(hello[-1].decode(errors='replace').split())
+                if phone != pattern.Phone.load():
+                    phone.save()
+                log.info('phone: %s%s', phone.describe(), ''.join('; ' + n for n in notes))
                 return
             buf = buf[-4096:]
     finally:

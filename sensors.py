@@ -1,28 +1,17 @@
-"""The phone's motion sensors via the Sensor Server app (WebSocket): its orientation (game
-rotation vector) and its acceleration without gravity (linear acceleration).
+"""The phone's motion sensors: its orientation (game rotation vector) and its acceleration
+without gravity (linear acceleration). The readings arrive through phonelink.py, already
+put onto our clock.
 
 The game rotation vector is gravity-aligned but its heading is arbitrary and drifts
 slowly, so the caller supplies the heading offset (learned from the cameras).
-
-Readings carry the phone's own timestamps. The phone's clock is put onto ours by the
-smallest delay seen (arrival minus phone time): Wi-Fi only ever adds delay, so the
-smallest is the truest, and it keeps learning as readings come in.
 """
-import asyncio
 import collections
-import json
-import os
-import threading
 import time
-import urllib.parse
 
 import numpy as np
-import websockets
 
-PHONE_IP = os.environ.get('PHONE_IP', '')     # only for the old Sensor Server way (PHONE_WEB=1)
 ROTATION = 'android.sensor.game_rotation_vector'
 ACCEL = 'android.sensor.linear_acceleration'
-URL = 'ws://{}:8080/sensors/connect?types=' + urllib.parse.quote(json.dumps([ROTATION, ACCEL]))
 
 # Android's world frame (x east-ish, y north-ish, z up) -> SteamVR's (x right, y up, z back)
 VR_FROM_ANDROID = np.array([[1.0, 0, 0], [0, 0, 1.0], [0, -1.0, 0]])
@@ -57,42 +46,15 @@ def yaw_matrix(a):
 
 
 class PhoneSensors:
-    def __init__(self, ip=PHONE_IP, log=print, on_accel=None, connect=True):
-        self.url = URL.format(ip)
+    def __init__(self, log=print, on_accel=None):
         self.log = log
         self.on_accel = on_accel    # called with (time, acceleration in the phone's sensor world)
         self.R = None               # phone axes (x screen-right, y screen-up, z out of screen)
         self.when = 0.0             # in a gravity-aligned VR-style frame of unknown heading
         self.count = 0
-        self.clock = None           # our time minus the phone's, seconds (smallest seen)
-        self.lag = 0.0              # how much older readings are than that says (learned)
-        self.clock_set = 0.0
+        self.lag = 0.0              # how much older readings are than their clock match says (learned)
         self.history = collections.deque(maxlen=400)    # (time, R) for the last ~2 s
         self.accel_hist = collections.deque(maxlen=400) # (time, |acceleration|)
-        if connect:
-            threading.Thread(target=lambda: asyncio.run(self._run()), daemon=True).start()
-
-    def _time(self, phone_ns):
-        now = time.monotonic()
-        d = now - phone_ns / 1e9
-        # follow the smallest delay; let it creep up slowly in case the clocks drift apart
-        if self.clock is None or d < self.clock or now - self.clock_set > 30:
-            self.clock = d if self.clock is None or d < self.clock else self.clock + 0.0005
-            self.clock_set = now
-        return phone_ns / 1e9 + self.clock - self.lag
-
-    async def _run(self):
-        while True:
-            try:
-                async with websockets.connect(self.url, open_timeout=5) as ws:
-                    self.log('sensors: connected')
-                    self.clock = None
-                    async for msg in ws:
-                        m = json.loads(msg)
-                        self.reading(m.get('type'), self._time(m['timestamp']), m['values'])
-            except Exception as e:      # app stopped, Wi-Fi dropped...
-                self.log('sensors: %s' % e)
-            await asyncio.sleep(2)
 
     def reading(self, kind, t, v):
         """One reading at time t (our clock)."""
